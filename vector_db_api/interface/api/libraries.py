@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from vector_db_api.domain.models.library import Library
+from vector_db_api.infrastructure.repo.in_memory_repository import repo_container
 
 
 class CreateLibraryRequest(BaseModel):
@@ -35,9 +36,6 @@ class LibraryResponse(BaseModel):
     document_count: int
 
 
-# In-memory storage for demonstration (will be replaced with proper repository)
-libraries_store: dict[UUID, Library] = {}
-
 router = APIRouter()
 
 
@@ -58,7 +56,7 @@ async def create_library(request: CreateLibraryRequest) -> LibraryResponse:
         metadata=request.metadata,
     )
     
-    libraries_store[library.id] = library
+    library = await repo_container.library_repo.create(library)
     
     return LibraryResponse(
         id=library.id,
@@ -84,10 +82,9 @@ async def get_library(library_id: UUID) -> LibraryResponse:
     Raises:
         HTTPException: If library is not found
     """
-    if library_id not in libraries_store:
+    library = await repo_container.library_repo.get_by_id(library_id)
+    if not library:
         raise HTTPException(status_code=404, detail="Library not found")
-    
-    library = libraries_store[library_id]
     
     return LibraryResponse(
         id=library.id,
@@ -107,6 +104,8 @@ async def list_libraries() -> List[LibraryResponse]:
     Returns:
         List of all libraries
     """
+    libraries = await repo_container.library_repo.list_all()
+    
     return [
         LibraryResponse(
             id=library.id,
@@ -116,7 +115,7 @@ async def list_libraries() -> List[LibraryResponse]:
             document_ids=library.document_ids,
             document_count=library.document_count,
         )
-        for library in libraries_store.values()
+        for library in libraries
     ]
 
 
@@ -135,10 +134,9 @@ async def update_library(library_id: UUID, request: UpdateLibraryRequest) -> Lib
     Raises:
         HTTPException: If library is not found
     """
-    if library_id not in libraries_store:
+    library = await repo_container.library_repo.get_by_id(library_id)
+    if not library:
         raise HTTPException(status_code=404, detail="Library not found")
-    
-    library = libraries_store[library_id]
     
     # Update only provided fields
     if request.name is not None:
@@ -148,7 +146,7 @@ async def update_library(library_id: UUID, request: UpdateLibraryRequest) -> Lib
     if request.metadata is not None:
         library.metadata = request.metadata
     
-    libraries_store[library_id] = library
+    library = await repo_container.library_repo.update(library)
     
     return LibraryResponse(
         id=library.id,
@@ -174,9 +172,24 @@ async def delete_library(library_id: UUID) -> dict:
     Raises:
         HTTPException: If library is not found
     """
-    if library_id not in libraries_store:
+    library = await repo_container.library_repo.get_by_id(library_id)
+    if not library:
         raise HTTPException(status_code=404, detail="Library not found")
     
-    del libraries_store[library_id]
+    # Delete all documents and their chunks in the library
+    documents = await repo_container.document_repo.list_by_library_id(library_id)
+    for document in documents:
+        # Delete all chunks in the document
+        chunks = await repo_container.chunk_repo.list_by_document_id(document.id)
+        for chunk in chunks:
+            await repo_container.chunk_repo.delete(chunk.id)
+        
+        # Delete the document
+        await repo_container.document_repo.delete(document.id)
+    
+    # Delete the library
+    success = await repo_container.library_repo.delete(library_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Library not found")
     
     return {"message": "Library deleted successfully"} 

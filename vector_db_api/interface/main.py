@@ -8,6 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from vector_db_api.interface.api.health import router as health_router
 from vector_db_api.interface.api.chunks import router as chunks_router
 from vector_db_api.interface.api.libraries import router as libraries_router
+from vector_db_api.interface.api.documents import router as documents_router
+from vector_db_api.interface.api.search import router as search_router
 
 
 def create_app() -> FastAPI:
@@ -32,7 +34,9 @@ def create_app() -> FastAPI:
     # Include routers
     app.include_router(health_router, prefix="/api/v1", tags=["health"])
     app.include_router(libraries_router, prefix="/api/v1", tags=["libraries"])
+    app.include_router(documents_router, prefix="/api/v1", tags=["documents"])
     app.include_router(chunks_router, prefix="/api/v1", tags=["chunks"])
+    app.include_router(search_router, prefix="/api/v1", tags=["search"])
 
     return app
 
@@ -49,4 +53,5 @@ async def root():
         "version": "0.1.0",
         "docs": "/docs",
         "redoc": "/redoc",
+        "structure": "Library → Document → Chunk hierarchy with vector search capabilities",
     } 

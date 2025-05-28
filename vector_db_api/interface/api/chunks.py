@@ -1,5 +1,5 @@
 """
-Chunks API endpoints for vector operations within libraries.
+Chunks API endpoints for vector operations within libraries and documents.
 """
 
 from typing import List, Optional
@@ -9,7 +9,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from vector_db_api.domain.models.chunk import Chunk
-from .libraries import libraries_store
+from vector_db_api.domain.models.document import Document
+from vector_db_api.infrastructure.repo.in_memory_repository import repo_container
 
 
 class CreateChunkRequest(BaseModel):
@@ -28,16 +29,66 @@ class ChunkResponse(BaseModel):
     dimension: int
 
 
-# In-memory storage for demonstration (will be replaced with proper repository)
-chunks_store: dict[UUID, Chunk] = {}
-
 router = APIRouter()
+
+
+@router.post("/libraries/{library_id}/documents/{document_id}/chunks", response_model=ChunkResponse)
+async def create_chunk_in_document(
+    library_id: UUID, 
+    document_id: UUID, 
+    request: CreateChunkRequest
+) -> ChunkResponse:
+    """
+    Create a new chunk within a specific document in a library.
+    
+    Args:
+        library_id: Unique identifier of the library
+        document_id: Unique identifier of the document
+        request: Chunk creation request with vector and metadata
+        
+    Returns:
+        Created chunk with generated ID
+        
+    Raises:
+        HTTPException: If library or document is not found
+    """
+    # Check if library exists
+    library = await repo_container.library_repo.get_by_id(library_id)
+    if not library:
+        raise HTTPException(status_code=404, detail="Library not found")
+    
+    # Check if document exists and belongs to library
+    document = await repo_container.document_repo.get_by_id(document_id)
+    if not document or document.library_id != library_id:
+        raise HTTPException(status_code=404, detail="Document not found in this library")
+    
+    # Create chunk
+    chunk = Chunk(
+        vector=request.vector,
+        metadata=request.metadata,
+        document_id=document_id,
+    )
+    
+    # Save chunk
+    chunk = await repo_container.chunk_repo.create(chunk)
+    
+    # Add chunk to document
+    document.add_chunk_id(chunk.id)
+    await repo_container.document_repo.update(document)
+    
+    return ChunkResponse(
+        id=chunk.id,
+        vector=chunk.vector,
+        metadata=chunk.metadata,
+        document_id=chunk.document_id,
+        dimension=chunk.dimension,
+    )
 
 
 @router.post("/libraries/{library_id}/chunks", response_model=ChunkResponse)
 async def create_chunk_in_library(library_id: UUID, request: CreateChunkRequest) -> ChunkResponse:
     """
-    Create a new chunk within a specific library.
+    Create a new chunk within a library (creates a default document if needed).
     
     Args:
         library_id: Unique identifier of the library
@@ -49,16 +100,48 @@ async def create_chunk_in_library(library_id: UUID, request: CreateChunkRequest)
     Raises:
         HTTPException: If library is not found
     """
-    if library_id not in libraries_store:
+    # Check if library exists
+    library = await repo_container.library_repo.get_by_id(library_id)
+    if not library:
         raise HTTPException(status_code=404, detail="Library not found")
     
+    # Create or use a default document for this library
+    documents = await repo_container.document_repo.list_by_library_id(library_id)
+    default_doc = None
+    
+    # Look for an existing default document
+    for doc in documents:
+        if doc.title.startswith("Default Document"):
+            default_doc = doc
+            break
+    
+    # Create default document if none exists
+    if not default_doc:
+        default_doc = Document(
+            title="Default Document",
+            content="Auto-created document for direct chunk uploads",
+            metadata={"auto_created": True},
+            library_id=library_id,
+        )
+        default_doc = await repo_container.document_repo.create(default_doc)
+        
+        # Add document to library
+        library.add_document_id(default_doc.id)
+        await repo_container.library_repo.update(library)
+    
+    # Create chunk
     chunk = Chunk(
         vector=request.vector,
         metadata=request.metadata,
-        document_id=request.document_id,
+        document_id=default_doc.id,
     )
     
-    chunks_store[chunk.id] = chunk
+    # Save chunk
+    chunk = await repo_container.chunk_repo.create(chunk)
+    
+    # Add chunk to document
+    default_doc.add_chunk_id(chunk.id)
+    await repo_container.document_repo.update(default_doc)
     
     return ChunkResponse(
         id=chunk.id,
@@ -67,6 +150,80 @@ async def create_chunk_in_library(library_id: UUID, request: CreateChunkRequest)
         document_id=chunk.document_id,
         dimension=chunk.dimension,
     )
+
+
+@router.get("/libraries/{library_id}/documents/{document_id}/chunks", response_model=List[ChunkResponse])
+async def list_chunks_in_document(library_id: UUID, document_id: UUID) -> List[ChunkResponse]:
+    """
+    List all chunks in a specific document within a library.
+    
+    Args:
+        library_id: Unique identifier of the library
+        document_id: Unique identifier of the document
+        
+    Returns:
+        List of chunks in the document
+        
+    Raises:
+        HTTPException: If library or document is not found
+    """
+    # Check if library exists
+    library = await repo_container.library_repo.get_by_id(library_id)
+    if not library:
+        raise HTTPException(status_code=404, detail="Library not found")
+    
+    # Check if document exists and belongs to library
+    document = await repo_container.document_repo.get_by_id(document_id)
+    if not document or document.library_id != library_id:
+        raise HTTPException(status_code=404, detail="Document not found in this library")
+    
+    # Get chunks
+    chunks = await repo_container.chunk_repo.list_by_document_id(document_id)
+    
+    return [
+        ChunkResponse(
+            id=chunk.id,
+            vector=chunk.vector,
+            metadata=chunk.metadata,
+            document_id=chunk.document_id,
+            dimension=chunk.dimension,
+        )
+        for chunk in chunks
+    ]
+
+
+@router.get("/libraries/{library_id}/chunks", response_model=List[ChunkResponse])
+async def list_chunks_in_library(library_id: UUID) -> List[ChunkResponse]:
+    """
+    List all chunks in a specific library (across all documents).
+    
+    Args:
+        library_id: Unique identifier of the library
+        
+    Returns:
+        List of chunks in the library
+        
+    Raises:
+        HTTPException: If library is not found
+    """
+    # Check if library exists
+    library = await repo_container.library_repo.get_by_id(library_id)
+    if not library:
+        raise HTTPException(status_code=404, detail="Library not found")
+    
+    # Get all chunks in the library
+    chunks = await repo_container.chunk_repo.list_by_library_id(library_id)
+    
+    return [
+        ChunkResponse(
+            id=chunk.id,
+            vector=chunk.vector,
+            metadata=chunk.metadata,
+            document_id=chunk.document_id,
+            dimension=chunk.dimension,
+        )
+        for chunk in chunks
+    ]
 
 
 @router.get("/libraries/{library_id}/chunks/{chunk_id}", response_model=ChunkResponse)
@@ -82,15 +239,25 @@ async def get_chunk_in_library(library_id: UUID, chunk_id: UUID) -> ChunkRespons
         Chunk data
         
     Raises:
-        HTTPException: If library or chunk is not found
+        HTTPException: If library or chunk is not found, or chunk doesn't belong to library
     """
-    if library_id not in libraries_store:
+    # Check if library exists
+    library = await repo_container.library_repo.get_by_id(library_id)
+    if not library:
         raise HTTPException(status_code=404, detail="Library not found")
     
-    if chunk_id not in chunks_store:
+    # Get chunk
+    chunk = await repo_container.chunk_repo.get_by_id(chunk_id)
+    if not chunk:
         raise HTTPException(status_code=404, detail="Chunk not found")
     
-    chunk = chunks_store[chunk_id]
+    # Verify chunk belongs to this library (through its document)
+    if chunk.document_id:
+        document = await repo_container.document_repo.get_by_id(chunk.document_id)
+        if not document or document.library_id != library_id:
+            raise HTTPException(status_code=404, detail="Chunk not found in this library")
+    else:
+        raise HTTPException(status_code=404, detail="Chunk not found in this library")
     
     return ChunkResponse(
         id=chunk.id,
@@ -99,36 +266,6 @@ async def get_chunk_in_library(library_id: UUID, chunk_id: UUID) -> ChunkRespons
         document_id=chunk.document_id,
         dimension=chunk.dimension,
     )
-
-
-@router.get("/libraries/{library_id}/chunks", response_model=List[ChunkResponse])
-async def list_chunks_in_library(library_id: UUID) -> List[ChunkResponse]:
-    """
-    List all chunks in a specific library.
-    
-    Args:
-        library_id: Unique identifier of the library
-        
-    Returns:
-        List of chunks in the library
-        
-    Raises:
-        HTTPException: If library is not found
-    """
-    if library_id not in libraries_store:
-        raise HTTPException(status_code=404, detail="Library not found")
-    
-    # For now, return all chunks (in a real implementation, we'd filter by library)
-    return [
-        ChunkResponse(
-            id=chunk.id,
-            vector=chunk.vector,
-            metadata=chunk.metadata,
-            document_id=chunk.document_id,
-            dimension=chunk.dimension,
-        )
-        for chunk in chunks_store.values()
-    ]
 
 
 @router.put("/libraries/{library_id}/chunks/{chunk_id}", response_model=ChunkResponse)
@@ -149,23 +286,35 @@ async def update_chunk_in_library(
         Updated chunk data
         
     Raises:
-        HTTPException: If library or chunk is not found
+        HTTPException: If library or chunk is not found, or chunk doesn't belong to library
     """
-    if library_id not in libraries_store:
+    # Check if library exists
+    library = await repo_container.library_repo.get_by_id(library_id)
+    if not library:
         raise HTTPException(status_code=404, detail="Library not found")
     
-    if chunk_id not in chunks_store:
+    # Get chunk
+    chunk = await repo_container.chunk_repo.get_by_id(chunk_id)
+    if not chunk:
         raise HTTPException(status_code=404, detail="Chunk not found")
+    
+    # Verify chunk belongs to this library (through its document)
+    if chunk.document_id:
+        document = await repo_container.document_repo.get_by_id(chunk.document_id)
+        if not document or document.library_id != library_id:
+            raise HTTPException(status_code=404, detail="Chunk not found in this library")
+    else:
+        raise HTTPException(status_code=404, detail="Chunk not found in this library")
     
     # Update the chunk
     updated_chunk = Chunk(
         id=chunk_id,
         vector=request.vector,
         metadata=request.metadata,
-        document_id=request.document_id,
+        document_id=chunk.document_id,  # Keep original document association
     )
     
-    chunks_store[chunk_id] = updated_chunk
+    updated_chunk = await repo_container.chunk_repo.update(updated_chunk)
     
     return ChunkResponse(
         id=updated_chunk.id,
@@ -189,20 +338,37 @@ async def delete_chunk_in_library(library_id: UUID, chunk_id: UUID) -> dict:
         Success message
         
     Raises:
-        HTTPException: If library or chunk is not found
+        HTTPException: If library or chunk is not found, or chunk doesn't belong to library
     """
-    if library_id not in libraries_store:
+    # Check if library exists
+    library = await repo_container.library_repo.get_by_id(library_id)
+    if not library:
         raise HTTPException(status_code=404, detail="Library not found")
     
-    if chunk_id not in chunks_store:
+    # Get chunk
+    chunk = await repo_container.chunk_repo.get_by_id(chunk_id)
+    if not chunk:
         raise HTTPException(status_code=404, detail="Chunk not found")
     
-    del chunks_store[chunk_id]
+    # Verify chunk belongs to this library (through its document)
+    if chunk.document_id:
+        document = await repo_container.document_repo.get_by_id(chunk.document_id)
+        if not document or document.library_id != library_id:
+            raise HTTPException(status_code=404, detail="Chunk not found in this library")
+        
+        # Remove chunk from document
+        document.remove_chunk_id(chunk_id)
+        await repo_container.document_repo.update(document)
+    else:
+        raise HTTPException(status_code=404, detail="Chunk not found in this library")
+    
+    # Delete chunk
+    await repo_container.chunk_repo.delete(chunk_id)
     
     return {"message": "Chunk deleted successfully"}
 
 
-# Keep the original chunk endpoints for backward compatibility
+# Legacy endpoints for backward compatibility
 @router.post("/chunks", response_model=ChunkResponse)
 async def create_chunk(request: CreateChunkRequest) -> ChunkResponse:
     """
@@ -220,7 +386,7 @@ async def create_chunk(request: CreateChunkRequest) -> ChunkResponse:
         document_id=request.document_id,
     )
     
-    chunks_store[chunk.id] = chunk
+    chunk = await repo_container.chunk_repo.create(chunk)
     
     return ChunkResponse(
         id=chunk.id,
@@ -245,10 +411,9 @@ async def get_chunk(chunk_id: UUID) -> ChunkResponse:
     Raises:
         HTTPException: If chunk is not found
     """
-    if chunk_id not in chunks_store:
+    chunk = await repo_container.chunk_repo.get_by_id(chunk_id)
+    if not chunk:
         raise HTTPException(status_code=404, detail="Chunk not found")
-    
-    chunk = chunks_store[chunk_id]
     
     return ChunkResponse(
         id=chunk.id,
@@ -267,6 +432,15 @@ async def list_chunks() -> List[ChunkResponse]:
     Returns:
         List of all chunks
     """
+    # This is a simplified implementation that gets all chunks from all libraries
+    # In a real implementation, you might want to paginate or filter this
+    libraries = await repo_container.library_repo.list_all()
+    all_chunks = []
+    
+    for library in libraries:
+        chunks = await repo_container.chunk_repo.list_by_library_id(library.id)
+        all_chunks.extend(chunks)
+    
     return [
         ChunkResponse(
             id=chunk.id,
@@ -275,7 +449,7 @@ async def list_chunks() -> List[ChunkResponse]:
             document_id=chunk.document_id,
             dimension=chunk.dimension,
         )
-        for chunk in chunks_store.values()
+        for chunk in all_chunks
     ]
 
 
@@ -293,9 +467,17 @@ async def delete_chunk(chunk_id: UUID) -> dict:
     Raises:
         HTTPException: If chunk is not found
     """
-    if chunk_id not in chunks_store:
+    chunk = await repo_container.chunk_repo.get_by_id(chunk_id)
+    if not chunk:
         raise HTTPException(status_code=404, detail="Chunk not found")
     
-    del chunks_store[chunk_id]
+    # Remove chunk from document if it belongs to one
+    if chunk.document_id:
+        document = await repo_container.document_repo.get_by_id(chunk.document_id)
+        if document:
+            document.remove_chunk_id(chunk_id)
+            await repo_container.document_repo.update(document)
+    
+    await repo_container.chunk_repo.delete(chunk_id)
     
     return {"message": "Chunk deleted successfully"} 
